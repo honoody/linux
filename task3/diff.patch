@@ -1,0 +1,128 @@
+diff --color --color -Naur linux/fs/proc/base.c "linux copy/fs/proc/base.c"
+--- linux/fs/proc/base.c        2023-04-26 15:28:44.000000000 +0300
++++ "linux copy/fs/proc/base.c" 2023-12-10 16:55:03.096098722 +0300
+@@ -3235,6 +3235,13 @@
+ static const struct file_operations proc_task_operations;
+ static const struct inode_operations proc_task_inode_operations;
+ 
++static int my_proc_counter(struct seq_file *m, struct pid_namespace *ns,
++                               struct pid *pid, struct task_struct *task)
++{
++       seq_printf(m, "horizon and further: %lu\n", task->my_counter);
++       return 0;
++}
++
+ static const struct pid_entry tgid_base_stuff[] = {
+        DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
+        DIR("fd",         S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
+@@ -3349,6 +3356,7 @@
+        ONE("ksm_merging_pages",  S_IRUSR, proc_pid_ksm_merging_pages),
+        ONE("ksm_stat",  S_IRUSR, proc_pid_ksm_stat),
+ #endif
++       ONE("my_counter", S_IRUGO, my_proc_counter),
+ };
+ 
+ static int proc_tgid_base_readdir(struct file *file, struct dir_context *ctx)
+@@ -3687,6 +3695,7 @@
+        ONE("ksm_merging_pages",  S_IRUSR, proc_pid_ksm_merging_pages),
+        ONE("ksm_stat",  S_IRUSR, proc_pid_ksm_stat),
+ #endif
++       ONE("my_counter", S_IRUGO, my_proc_counter),
+ };
+ 
+ static int proc_tid_base_readdir(struct file *file, struct dir_context *ctx)
+diff --color --color -Naur linux/include/linux/sched.h "linux copy/include/linux/sched.h"
+--- linux/include/linux/sched.h 2023-12-10 17:12:29.334974958 +0300
++++ "linux copy/include/linux/sched.h"  2023-12-10 17:23:07.405505200 +0300
+@@ -1528,7 +1528,6 @@
+        union rv_task_monitor           rv[RV_PER_TASK_MONITORS];
+ #endif
+ 
+-
+        /*
+         * New fields for task_struct should be added above here, so that
+         * they are included in the randomized portion of task_struct.
+@@ -1538,6 +1537,8 @@
+        /* CPU-specific state of this task: */
+        struct thread_struct            thread;
+ 
++       unsigned long my_counter;
++
+        /*
+         * WARNING: on x86, 'thread_struct' contains a variable-sized
+         * structure.  It *MUST* be at the end of 'task_struct'.
+diff --color --color -Naur linux/init/init_task.c "linux copy/init/init_task.c"
+--- linux/init/init_task.c      2023-04-26 15:28:44.000000000 +0300
++++ "linux copy/init/init_task.c"       2023-12-10 17:27:10.536901174 +0300
+@@ -115,6 +115,7 @@
+        .thread         = INIT_THREAD,
+        .fs             = &init_fs,
+        .files          = &init_files,
++       .my_counter = 0,
+ #ifdef CONFIG_IO_URING
+        .io_uring       = NULL,
+ #endif
+diff --color --color -Naur linux/kernel/fork.c "linux copy/kernel/fork.c"
+--- linux/kernel/fork.c 2023-04-26 15:28:44.000000000 +0300
++++ "linux copy/kernel/fork.c"  2023-12-10 17:26:42.168972325 +0300
+@@ -2488,6 +2488,8 @@
+        if (pidfile)
+                fd_install(pidfd, pidfile);
+ 
++       p->my_counter = 0;
++
+        proc_fork_connector(p);
+        sched_post_fork(p);
+        cgroup_post_fork(p, args);
+diff --color --color -Naur linux/kernel/sched/core.c "linux copy/kernel/sched/core.c"
+--- linux/kernel/sched/core.c   2023-04-26 15:28:44.000000000 +0300
++++ "linux copy/kernel/sched/core.c"    2023-12-10 17:26:02.421071751 +0300
+@@ -3642,6 +3642,7 @@
+ {
+        check_preempt_curr(rq, p, wake_flags);
+        WRITE_ONCE(p->__state, TASK_RUNNING);
++       WRITE_ONCE(p->my_counter, READ_ONCE(p->my_counter) + 1);
+        trace_sched_wakeup(p);
+ 
+ #ifdef CONFIG_SMP
+@@ -4095,6 +4096,7 @@
+ 
+                trace_sched_waking(p);
+                WRITE_ONCE(p->__state, TASK_RUNNING);
++               WRITE_ONCE(p->my_counter, READ_ONCE(p->my_counter) + 1);
+                trace_sched_wakeup(p);
+                goto out;
+        }
+@@ -4718,6 +4720,7 @@
+ 
+        raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
+        WRITE_ONCE(p->__state, TASK_RUNNING);
++       WRITE_ONCE(p->my_counter, READ_ONCE(p->my_counter) + 1);
+ #ifdef CONFIG_SMP
+        /*
+         * Fork balancing, do it here and not earlier because:
+@@ -6485,6 +6488,7 @@
+        if (!(sched_mode & SM_MASK_PREEMPT) && prev_state) {
+                if (signal_pending_state(prev_state, prev)) {
+                        WRITE_ONCE(prev->__state, TASK_RUNNING);
++                       WRITE_ONCE(prev->my_counter, READ_ONCE(prev->my_counter) + 1);
+                } else {
+                        prev->sched_contributes_to_load =
+                                (prev_state & TASK_UNINTERRUPTIBLE) &&
+@@ -8656,6 +8660,7 @@
+  */
+ void __sched yield(void)
+ {
++       WRITE_ONCE(current->my_counter, READ_ONCE(current->my_counter) + 1);
+        set_current_state(TASK_RUNNING);
+        do_sched_yield();
+ }
+@@ -9004,6 +9009,8 @@
+ 
+        raw_spin_lock_irqsave(&idle->pi_lock, flags);
+        raw_spin_rq_lock(rq);
++
++       WRITE_ONCE(idle->my_counter, READ_ONCE(idle->my_counter) + 1);
+ 
+        idle->__state = TASK_RUNNING;
+        idle->se.exec_start = sched_clock();
